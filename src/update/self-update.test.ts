@@ -26,8 +26,8 @@ const headersOf = (init: RequestInit | undefined) => new Headers(init?.headers ?
 
 describe("packageRoot", () => {
   it("should point at the installed package, not at src", () => {
-    // Act / Assert
-    expect(packageRoot()).toMatch(/sol-ai-cli\/$/);
+    // Act / Assert — vitest runs from the repo root, whatever the checkout is called.
+    expect(packageRoot()).toBe(`${process.cwd()}/`);
   });
 });
 
