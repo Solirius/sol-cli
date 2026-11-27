@@ -17,7 +17,7 @@ export const TOOLS_MOUNT_POINT = "/opt/sol-tools";
 export const DEFAULT_TOOLS_VOLUME = "sol-tools";
 
 /** Alpine's busybox wget speaks TLS, which is all the installer needs. */
-export const DOWNLOAD_HELPER_IMAGE = "alpine:3.22";
+export const DOWNLOAD_HELPER_IMAGE = "alpine:3.24";
 /** `install-claude.sh`'s answer for "nothing here can download". */
 export const NO_DOWNLOADER_CODE = 3;
 
