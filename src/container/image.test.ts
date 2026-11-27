@@ -3,7 +3,7 @@ import { createFakeSeams, FIXED_NOW } from "../__fixtures__/fake-seams.js";
 import { DAILY_MS, imageUser, inspectImageUser, pullImage, shouldPull } from "./image.js";
 
 const HOME = "/home/dev";
-const IMAGE = "docker.io/solirius/devcontainer:1";
+const IMAGE = "ghcr.io/solirius/devcontainer:1";
 const PULLS = `${HOME}/.local/state/sol/pulls.json`;
 
 describe("shouldPull", () => {

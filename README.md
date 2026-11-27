@@ -19,7 +19,7 @@ solr           # pick up where you were
 - **Ports are published as they open.** Any server the session starts listening on is published on the same port of `localhost`, if that port is free.
 - **Docker works inside.** The container runs its own Docker engine, so `docker`, `docker compose` and Testcontainers work without access to the host's Docker.
 
-The default image is [`solirius/devcontainer`](https://hub.docker.com/r/solirius/devcontainer). It is Ubuntu with Java, Node, Python, Claude Code and the usual dev tools; see [image/README.md](image/README.md).
+The default image is [`ghcr.io/solirius/devcontainer`](https://github.com/Solirius/sol-cli/pkgs/container/devcontainer). It is Ubuntu with Java, Node, Python, Claude Code and the usual dev tools; see [image/README.md](image/README.md).
 
 ## Requirements
 
@@ -98,14 +98,14 @@ Read [CLAUDE.md](CLAUDE.md) before changing anything. It explains the design rul
 
 ## Releasing
 
-- **The CLI.** A push to `master` that changes what ships (`src`, `runtime`, `package.json`) publishes to npm. The patch number is bumped automatically, and the release is tagged `v<version>`. Publishing uses npm trusted publishing (OIDC) with provenance, so no npm token is stored.
+- **The CLI.** A push to `master` that changes what ships (`src`, `runtime`, `package.json`) publishes to npm. The patch number is bumped automatically, and the release is tagged `v<version>`. Publishing uses npm trusted publishing (OIDC), so no npm token is stored. Releases carry a provenance attestation once the repository is public; npm refuses one from a private repository.
 - **The image.** `.github/workflows/image.yml` rebuilds the image when `image/` changes, every Monday, and on demand. It pushes `linux/amd64` and `linux/arm64` builds tagged `1`, `latest`, `1.YYYYMMDD` and `sha-<commit>`. The CLI uses `:1`, so a rebuilt image reaches everyone without a CLI release. Bump the major tag, and `DEFAULT_IMAGE`, only for a breaking change to the image contract.
 - **Renovate** keeps everything current: the base image digest, every tool version in `image/Dockerfile` (each `ARG` carries a `# renovate:` comment), GitHub Actions, and the dev dependencies. Minor, patch and digest updates merge automatically once CI passes.
 
 ### One-time setup
 
 1. On npmjs.com, create the `@solirius-reply` organisation. Do the first publish by hand (`npm publish --access public`). Then add a trusted publisher for `Solirius/sol-cli`, workflow `release-cli.yml`.
-2. On Docker Hub, create the `solirius/devcontainer` repository. Add `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` (a read/write access token) as repository secrets.
+2. After the image workflow's first push, open the `devcontainer` package under the organisation's Packages on GitHub. In its settings, make it public, so `docker pull` needs no login. The workflow pushes with `GITHUB_TOKEN`, so no secrets are needed.
 3. Install the [Renovate GitHub App](https://github.com/apps/renovate) on the repository.
 4. Allow `github-actions[bot]` to push the release commit and tag to `master`, if `master` is protected.
 

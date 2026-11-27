@@ -1,4 +1,4 @@
-# solirius/devcontainer
+# ghcr.io/solirius/devcontainer
 
 The default image for [`sol`](https://www.npmjs.com/package/@solirius-reply/ai-cli), which runs Claude Code in a container. You can also use it as a general-purpose dev container.
 
@@ -26,7 +26,7 @@ The image is rebuilt every week to pick up security updates, and again whenever 
 ## Using it without sol
 
 ```sh
-docker run --rm -it --privileged -v "$PWD:$PWD" -w "$PWD" solirius/devcontainer:1
+docker run --rm -it --privileged -v "$PWD:$PWD" -w "$PWD" ghcr.io/solirius/devcontainer:1
 ```
 
 Source: https://github.com/Solirius/sol-cli/tree/master/image

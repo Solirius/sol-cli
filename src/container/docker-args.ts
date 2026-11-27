@@ -4,7 +4,7 @@ import { type Mount, renderMount } from "./mounts.js";
 export const DOCKER_BIN = "docker";
 
 /** The major tag, so a rebuilt image reaches everyone on their next pull without a CLI release. */
-export const DEFAULT_IMAGE = "docker.io/solirius/devcontainer:1";
+export const DEFAULT_IMAGE = "ghcr.io/solirius/devcontainer:1";
 
 /** Read-only, and invoked as `sh <script>` so the staged copies need no execute bit. */
 export const RUNTIME_MOUNT_POINT = "/opt/sol";

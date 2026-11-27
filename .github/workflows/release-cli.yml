@@ -70,11 +70,14 @@ jobs:
           echo "publishing v${current}"
           echo "version=${current}" >> "$GITHUB_OUTPUT"
 
-      # Trusted publishing needs npm 11.5.1 or later.
+      # Trusted publishing needs npm 11.5.1 or later. npm refuses a provenance statement from a
+      # private repository, so the attestation is only asked for once this one is public.
       - name: Publish
+        env:
+          PROVENANCE: ${{ !github.event.repository.private }}
         run: |
           npm install -g npm@latest
-          npm publish --access public
+          npm publish --access public --provenance="$PROVENANCE"
 
       # Publish first: a tag with no package behind it is a gap the next run bumps past, but a
       # published version master does not record would be retried forever.
