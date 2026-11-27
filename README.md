@@ -100,7 +100,7 @@ Read [CLAUDE.md](CLAUDE.md) before changing anything. It explains the design rul
 
 - **The CLI.** A push to `master` that changes what ships (`src`, `runtime`, `package.json`) publishes to npm. The patch number is bumped automatically, and the release is tagged `v<version>`. Publishing uses npm trusted publishing (OIDC), so no npm token is stored. Releases carry a provenance attestation once the repository is public; npm refuses one from a private repository.
 - **The image.** `.github/workflows/image.yml` rebuilds the image when `image/` changes, every Monday, and on demand. It pushes `linux/amd64` and `linux/arm64` builds tagged `1`, `latest`, `1.YYYYMMDD` and `sha-<commit>`. The CLI uses `:1`, so a rebuilt image reaches everyone without a CLI release. Bump the major tag, and `DEFAULT_IMAGE`, only for a breaking change to the image contract.
-- **Renovate** keeps everything current: the base image digest, every tool version in `image/Dockerfile` (each `ARG` carries a `# renovate:` comment), GitHub Actions, and the dev dependencies. Minor, patch and digest updates merge automatically once CI passes.
+- **Renovate** keeps everything current: the base image digest, every tool version in `image/Dockerfile` (each `ARG` carries a `# renovate:` comment), GitHub Actions, and the dev dependencies. Every update, majors included, merges itself once all of its checks pass. Renovate waits for the checks itself, because `master` has no required status checks; an image update has to pass `image/test.sh` before it can merge.
 
 ### One-time setup
 

@@ -1,14 +1,15 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["config:recommended", "helpers:pinGitHubActionDigests", "docker:pinDigests", ":semanticCommitTypeAll(chore)"],
+  "automerge": true,
+  "platformAutomerge": false,
   "timezone": "Europe/London",
   "rebaseWhen": "behind-base-branch",
   "vulnerabilityAlerts": {
     "labels": ["security"]
   },
   "lockFileMaintenance": {
-    "enabled": true,
-    "automerge": true
+    "enabled": true
   },
   "customManagers": [
     {
@@ -29,14 +30,8 @@
   ],
   "packageRules": [
     {
-      "description": "Automerge everything but majors once CI passes",
-      "matchUpdateTypes": ["minor", "patch", "pin", "digest", "pinDigest"],
-      "automerge": true
-    },
-    {
-      "description": "Claude Code ships often and the image is what delivers it: take every release automatically",
+      "description": "Claude Code ships often: one PR for it, apart from the other image tools",
       "matchPackageNames": ["@anthropic-ai/claude-code"],
-      "automerge": true,
       "groupName": "Claude Code"
     },
     {
@@ -49,12 +44,6 @@
       "description": "Stay on the stable Maven line, not release candidates",
       "matchPackageNames": ["org.apache.maven:apache-maven"],
       "allowedVersions": "!/-(alpha|beta|rc)/"
-    },
-    {
-      "description": "The base image moves only between LTS releases, and only by hand",
-      "matchPackageNames": ["ubuntu"],
-      "matchUpdateTypes": ["major"],
-      "automerge": false
     },
     {
       "description": "The dev toolchain the CLI is built with",
