@@ -1,0 +1,97 @@
+name: Image
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "image/**"
+      - ".github/workflows/image.yml"
+  pull_request:
+    paths:
+      - "image/**"
+      - ".github/workflows/image.yml"
+  # Weekly, for the Ubuntu security updates that no version bump announces.
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IMAGE: docker.io/solirius/devcontainer
+  # The major tag sol pulls; bump it, and DEFAULT_IMAGE in src/container/docker-args.ts, for a breaking change to the image contract.
+  MAJOR: "1"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build for this runner
+        uses: docker/build-push-action@v7
+        with:
+          context: image
+          load: true
+          tags: solirius/devcontainer:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Check the image contract
+        run: image/test.sh solirius/devcontainer:test
+
+  publish:
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-qemu-action@v4
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=${{ env.MAJOR }}
+            type=raw,value=latest
+            type=raw,value=${{ env.MAJOR }}.{{date 'YYYYMMDD'}}
+            type=sha
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: image
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: mode=max
+          sbom: true
+
+      - name: Publish the README to Docker Hub
+        uses: peter-evans/dockerhub-description@v5
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: solirius/devcontainer
+          readme-filepath: image/README.md
+          short-description: Java, Node and Python on Ubuntu with Claude Code and a nested Docker engine; the default image for sol.

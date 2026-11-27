@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  check:
+    # macOS too: the Docker Desktop paths and platform detection only run there.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+
+      # Node 26 ships no corepack, so `packageManager` cannot put yarn on PATH without it.
+      - name: Enable corepack
+        run: |
+          npm install -g corepack@latest
+          corepack enable
+
+      - name: Install
+        run: yarn install --immutable
+
+      - name: Lint
+        run: yarn lint
+
+      # Biome exits 1 with no findings when it inspects 0 files, so a misconfigured
+      # `files.includes` must not pass as a clean run.
+      - name: Assert Biome inspected files
+        shell: bash
+        run: |
+          set -euo pipefail
+          summary="$(yarn biome check --reporter=summary . 2>&1 || true)"
+          printf '%s\n' "$summary"
+          checked="$(printf '%s\n' "$summary" | sed -n 's/.*Checked \([0-9][0-9]*\) file.*/\1/p' | head -n 1)"
+          if [[ -z "$checked" || "$checked" -eq 0 ]]; then
+            echo "Biome inspected no files" >&2
+            exit 1
+          fi
+
+      - name: Typecheck
+        run: yarn typecheck
+
+      - name: Test
+        run: yarn test:coverage
+
+      - name: Build
+        run: yarn build
+
+      - name: Pack
+        run: npm pack --dry-run

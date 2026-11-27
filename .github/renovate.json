@@ -1,0 +1,66 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", "helpers:pinGitHubActionDigests", "docker:pinDigests", ":semanticCommitTypeAll(chore)"],
+  "timezone": "Europe/London",
+  "rebaseWhen": "behind-base-branch",
+  "vulnerabilityAlerts": {
+    "labels": ["security"]
+  },
+  "lockFileMaintenance": {
+    "enabled": true,
+    "automerge": true
+  },
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Tool versions in the image, each ARG annotated with its datasource",
+      "managerFilePatterns": ["/^image/Dockerfile$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>[a-z-]+?) depName=(?<depName>[^\\s]+?)(?: versioning=(?<versioning>[^\\s]+?))?\\s+ARG [A-Z_]+=(?<currentValue>[^\\s]+)"
+      ]
+    },
+    {
+      "customType": "regex",
+      "description": "The images the CLI starts besides the session image",
+      "managerFilePatterns": ["/^src/.+\\.ts$/"],
+      "matchStrings": ["\"(?<depName>busybox|alpine):(?<currentValue>[^\"@]+)\""],
+      "datasourceTemplate": "docker"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Automerge everything but majors once CI passes",
+      "matchUpdateTypes": ["minor", "patch", "pin", "digest", "pinDigest"],
+      "automerge": true
+    },
+    {
+      "description": "Claude Code ships often and the image is what delivers it: take every release automatically",
+      "matchPackageNames": ["@anthropic-ai/claude-code"],
+      "automerge": true,
+      "groupName": "Claude Code"
+    },
+    {
+      "description": "Node majors follow LTS only",
+      "matchDatasources": ["node-version"],
+      "matchPackageNames": ["node"],
+      "allowedVersions": "/^\\d*[02468]\\./"
+    },
+    {
+      "description": "Stay on the stable Maven line, not release candidates",
+      "matchPackageNames": ["org.apache.maven:apache-maven"],
+      "allowedVersions": "!/-(alpha|beta|rc)/"
+    },
+    {
+      "description": "The base image moves only between LTS releases, and only by hand",
+      "matchPackageNames": ["ubuntu"],
+      "matchUpdateTypes": ["major"],
+      "automerge": false
+    },
+    {
+      "description": "The dev toolchain the CLI is built with",
+      "matchDepTypes": ["devDependencies"],
+      "groupName": "dev dependencies",
+      "matchUpdateTypes": ["minor", "patch"]
+    }
+  ]
+}

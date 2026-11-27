@@ -1,0 +1,122 @@
+import { resolve } from "node:path";
+import type { Fs } from "../system/fs.js";
+import { REGISTRATION_HOOK_OVERRIDE_WARNING } from "./hooks.js";
+import type { Settings } from "./settings.js";
+
+export const SETTINGS_FLAG = "--settings";
+
+const INLINE_PREFIX = `${SETTINGS_FLAG}=`;
+
+const END_OF_OPTIONS = "--";
+
+/**
+ * claude's `--settings` is last-wins rather than merged, so a user-supplied one has to come
+ * out of the forwarded argv and be merged in. Everything after a bare `--` is prompt text.
+ */
+export function extractUserSettings(argv: string[]): { argv: string[]; value?: string } {
+  const kept: string[] = [];
+  let value: string | undefined;
+  let awaitingValue = false;
+  for (const [index, arg] of argv.entries()) {
+    if (awaitingValue) {
+      value = arg;
+      awaitingValue = false;
+    } else if (arg === END_OF_OPTIONS) {
+      kept.push(...argv.slice(index));
+      break;
+    } else if (arg === SETTINGS_FLAG) {
+      awaitingValue = true;
+    } else if (arg.startsWith(INLINE_PREFIX)) {
+      value = arg.slice(INLINE_PREFIX.length);
+    } else {
+      kept.push(arg);
+    }
+  }
+  if (awaitingValue) {
+    throw new Error(`${SETTINGS_FLAG} was given with no value`);
+  }
+  return { argv: kept, value };
+}
+
+/**
+ * The user's keys win, except `hooks`: those concatenate per event with sol's first, so a
+ * hook of the user's own cannot discard sol's session-registry hooks.
+ */
+export function mergeSettings(ours: Settings, theirs: Settings): { settings: Settings; warnings: string[] } {
+  const settings = { ...ours, ...theirs };
+  const hooks = mergeHooks(ours.hooks, theirs.hooks);
+  if (hooks !== undefined) {
+    settings.hooks = hooks;
+  }
+  const warnings: string[] = [];
+  if (isHookMap(ours.hooks) && !keepsOurHooks(ours.hooks, hooks)) {
+    warnings.push(REGISTRATION_HOOK_OVERRIDE_WARNING);
+  }
+  return { settings, warnings };
+}
+
+/** Undefined when neither side has any, so no empty `hooks` key reaches claude. */
+function mergeHooks(ours: unknown, theirs: unknown): unknown {
+  if (!isHookMap(ours) || !isHookMap(theirs)) {
+    // A shape this cannot merge: the user's wins, as every other key does, and the warning says so.
+    return theirs ?? ours;
+  }
+  const merged: Record<string, unknown> = { ...ours, ...theirs };
+  for (const [event, mine] of Object.entries(ours)) {
+    const yours = theirs[event];
+    if (Array.isArray(mine) && Array.isArray(yours)) {
+      merged[event] = [...mine, ...yours];
+    }
+  }
+  return merged;
+}
+
+/** Every command sol registered has to still be in the merged settings, or it was replaced. */
+function keepsOurHooks(ours: Record<string, unknown>, merged: unknown): boolean {
+  // Wrapped in an array so this is a string whatever `merged` turned out to be.
+  const commands = JSON.stringify([merged]);
+  return hookCommands(ours).every((command) => commands.includes(JSON.stringify(command)));
+}
+
+function hookCommands(hooks: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  for (const groups of Object.values(hooks)) {
+    for (const group of Array.isArray(groups) ? groups : []) {
+      for (const entry of Array.isArray((group as { hooks?: unknown }).hooks) ? (group as { hooks: unknown[] }).hooks : []) {
+        const command = (entry as { command?: unknown }).command;
+        if (typeof command === "string") {
+          out.push(command);
+        }
+      }
+    }
+  }
+  return out;
+}
+
+function isHookMap(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Resolved as claude resolves it: a value starting with `{` is inline JSON, anything else is a path. */
+export async function readUserSettings(deps: { fs: Fs; cwd: string }, value: string): Promise<Settings> {
+  const json = value.trimStart().startsWith("{") ? value : await readSettingsFile(deps, value);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    throw new Error(`${SETTINGS_FLAG} ${value} is not valid JSON`);
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`${SETTINGS_FLAG} ${value} is not a JSON object`);
+  }
+  return parsed as Settings;
+}
+
+async function readSettingsFile(deps: { fs: Fs; cwd: string }, value: string): Promise<string> {
+  const path = resolve(deps.cwd, value);
+  const contents = await deps.fs.readText(path);
+  if (contents === null) {
+    throw new Error(`${SETTINGS_FLAG} ${value} cannot be read (looked for ${path})`);
+  }
+  return contents;
+}

@@ -1,0 +1,113 @@
+name: Release CLI
+
+on:
+  push:
+    branches: [master]
+    # Only what ships in the package: a dev-dependency bump or a test change is no release.
+    paths:
+      - "src/**"
+      - "!src/**/*.test.ts"
+      - "!src/__fixtures__/**"
+      - "runtime/**"
+      - "package.json"
+      - ".github/workflows/release-cli.yml"
+
+# Never cancel a release in progress: two overlapping publishes would race on the version.
+concurrency:
+  group: release-cli-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      # npm trusted publishing: no token, and the package carries a provenance attestation.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # Before setup-node, whose `cache: yarn` runs `yarn --version` itself.
+      - name: Enable corepack
+        run: |
+          npm install -g corepack@latest
+          corepack enable
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: yarn
+          registry-url: https://registry.npmjs.org
+
+      - name: Install
+        run: yarn install --immutable
+
+      # CI gates pull requests; a direct push to master still has to pass before it publishes.
+      - name: Lint
+        run: yarn lint
+
+      - name: Typecheck
+        run: yarn typecheck
+
+      - name: Test
+        run: yarn test:coverage
+
+      - name: Build
+        run: yarn build
+
+      # A version set by hand is published as it stands; anything else gets a patch bump past
+      # every version already tagged.
+      - name: Resolve the version to publish
+        id: bump
+        run: |
+          current="$(node -p 'require("./package.json").version')"
+          while git rev-parse -q --verify "refs/tags/v${current}" >/dev/null; do
+            npm version patch --no-git-tag-version
+            current="$(node -p 'require("./package.json").version')"
+          done
+          echo "publishing v${current}"
+          echo "version=${current}" >> "$GITHUB_OUTPUT"
+
+      # Trusted publishing needs npm 11.5.1 or later.
+      - name: Publish
+        run: |
+          npm install -g npm@latest
+          npm publish --access public
+
+      # Publish first: a tag with no package behind it is a gap the next run bumps past, but a
+      # published version master does not record would be retried forever.
+      - name: Commit the bump and tag the release
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add package.json
+          UNRECORDED="published v${VERSION} but could not record the bump on ${GITHUB_REF_NAME}. Set version to ${VERSION} in package.json by hand, or the next release will retry a version npm already has."
+          if git diff --cached --quiet; then
+            published="$(git rev-parse HEAD)"
+          else
+            # Pushes made with GITHUB_TOKEN do not trigger workflows, so this cannot loop.
+            git commit -m "chore: release v${VERSION} [skip ci]"
+            published="$(git rev-parse HEAD)"
+            for attempt in 1 2 3; do
+              if git push origin "HEAD:${GITHUB_REF_NAME}"; then
+                break
+              fi
+              if [ "$attempt" = 3 ]; then
+                echo "::error::${UNRECORDED}" >&2
+                exit 1
+              fi
+              git fetch origin "${GITHUB_REF_NAME}" || true
+              git rebase "origin/${GITHUB_REF_NAME}" || {
+                echo "::error::${UNRECORDED}" >&2
+                exit 1
+              }
+            done
+          fi
+          git push origin "${published}:refs/tags/v${VERSION}" || {
+            echo "::error::published v${VERSION} but could not tag it. Run: git push origin ${published}:refs/tags/v${VERSION}" >&2
+            exit 1
+          }

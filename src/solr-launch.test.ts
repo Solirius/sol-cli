@@ -1,0 +1,644 @@
+import { describe, expect, it } from "vitest";
+import { createFakeSeams, type FakeSeams, FIXED_NOW } from "./__fixtures__/fake-seams.js";
+import { solScriptPath } from "./claude/hooks.js";
+import { COMPACTION_THRESHOLD, claimPath, recordLine, registryPath, type SessionRecord } from "./solr/registry.js";
+import { transcriptPath } from "./solr/title.js";
+import { launchSolr, NOTHING_TO_RESTORE } from "./solr-launch.js";
+import { packageRoot } from "./update/self-update.js";
+import { VOLUME_HOME } from "./volume/volume-fs.js";
+
+const HOME = "/home/dev";
+const REGISTRY = registryPath({ HOME })!;
+/** In a container, so `launch` hands over in place rather than starting one. */
+const IN_CONTAINER = { "/.dockerenv": "" };
+const SLUG = "-work";
+const TRANSCRIPT = transcriptPath(`${HOME}/.claude/projects/${SLUG}`, "s1");
+const TRANSCRIPT_S2 = transcriptPath(`${HOME}/.claude/projects/${SLUG}`, "s2");
+const titled = (name: string) => `${JSON.stringify({ type: "custom-title", customTitle: name })}\n`;
+/** An ordinary transcript record, carrying the directory the session was in when it was written. */
+const inDir = (cwd: string) => `${JSON.stringify({ type: "user", cwd, message: { role: "user", content: "go on" } })}\n`;
+
+/** The fake seams' own hostname, so a recorded pid is one `solr` may ask `ps` about. */
+const HOST = "workstation";
+const MINUTE = 60 * 1000;
+const DAY = 24 * 60 * 60 * 1000;
+
+const record = (over: Partial<SessionRecord> = {}): SessionRecord => ({
+  sessionId: "s1",
+  cwd: "/work",
+  state: "open",
+  at: FIXED_NOW,
+  pid: 100,
+  host: HOST,
+  ...over
+});
+
+/** A `ps` that says every recorded pid is gone. */
+function respond(argv: string[]) {
+  if (argv[0] === "ps") {
+    return { code: 1, stdout: "" };
+  }
+  return { code: 0 };
+}
+
+function seamsIn(files: Record<string, string> = {}, over: Parameters<typeof createFakeSeams>[0] = {}) {
+  const seams = createFakeSeams({
+    env: { HOME, SOL_NO_UPDATE: "1" },
+    cwd: "/work",
+    files: { ...IN_CONTAINER, ...files },
+    respond,
+    ...over
+  });
+  // The directories the records point at: a record whose directory is gone is skipped.
+  for (const dir of ["/work", "/other", "/elsewhere"]) {
+    seams.fs.dirs.add(dir);
+  }
+  return seams;
+}
+
+const execArgv = (seams: FakeSeams) => seams.runner.execCalls[0]?.argv ?? [];
+
+describe("launchSolr", () => {
+  describe("resuming", () => {
+    it("should claim a conversation and hand -r to sol's own launch, never spawning claude itself", async () => {
+      // Arrange
+      const seams = seamsIn({ [REGISTRY]: recordLine(record()) });
+
+      // Act
+      await launchSolr({ seams, processArgv: ["node", "/bin/solr"] });
+
+      // Assert
+      expect(execArgv(seams)[0]).toBe("claude");
+      expect(execArgv(seams).slice(-2)).toEqual(["-r", "s1"]);
+      expect(seams.fs.store.has(claimPath({ HOME }, "s1")!)).toBe(true);
+    });
+
+    it("should put the record's name back on the argv when no transcript can answer", async () => {
+      // Arrange
+      const seams = seamsIn({ [REGISTRY]: recordLine(record({ name: "the pcs one" })) });
+
+      // Act
+      await launchSolr({ seams, processArgv: ["node", "/bin/solr"] });
+
+      // Assert
+      expect(execArgv(seams).slice(-4)).toEqual(["-r", "s1", "--name", "the pcs one"]);
+    });
+
+    it("should skip a conversation whose directory has been deleted, without claiming it", async () => {
+      // Arrange
+      const seams = seamsIn({ [REGISTRY]: recordLine(record({ cwd: "/deleted-worktree" })) }, { env: { HOME, SOL_NO_UPDATE: "1", SOL_VERBOSE: "1" } });
+
+      // Act
+      await launchSolr({ seams, processArgv: ["node", "/bin/solr"] });
+
+      // Assert
+      expect(seams.chdirs).toEqual([]);
+      expect(seams.fs.store.has(claimPath({ HOME }, "s1")!)).toBe(false);
+      expect(seams.lines.join("")).toContain("its directory /deleted-worktree is gone");
+    });
+
+    it.each<[string, string[]]>([
+      ["-r, a natural typo of sol -r", ["-r", "abc"]],
+      ["--resume=", ["--resume=abc"]],
+      ["-c", ["-c"]],
+      ["--continue", ["--continue"]]
+    ])("should claim nothing when the arguments already say which conversation to open, given %s", async (_name, args) => {
+      // Arrange
+      const seams = seamsIn({ [REGISTRY]: recordLine(record()) });
+
+      // Act
+      await launchSolr({ seams, processArgv: ["node", "/bin/solr", ...args] });
+
+      // Assert
+      expect(execArgv(seams).slice(-args.length)).toEqual(args);
+      expect(execArgv(seams)).not.toContain("s1");
+      expect(seams.fs.store.has(claimPath({ HOME }, "s1")!)).toBe(false);
+    });
+
+    it("should forward the extra arguments it was given after the resume", async () => {
+      // Arrange
+      const seams = seamsIn({ [REGISTRY]: recordLine(record()) });
+
+      // Act
+      await launchSolr({ seams, processArgv: ["node", "/bin/solr", "--model", "opus"] });
+
+      // Assert
+      expect(execArgv(seams).slice(-4)).toEqual(["-r", "s1", "--model", "opus"]);
+    });
+
+    it("should write no escape sequence of its own, the title being Claude Code's to set", async () => {
+      // Arrange
+      const seams = seamsIn({ [REGISTRY]: recordLine(record({ name: "the pcs one" })) });
+
+      // Act
+      await launchSolr({ seams, processArgv: ["node", "/bin/solr"] });
+
+      // Assert
+      expect(seams.out).toEqual([]);
+      expect(execArgv(seams).slice(-4)).toEqual(["-r", "s1", "--name", "the pcs one"]);
+    });
+
+    it("should name a conversation the registry has no name for, its transcript having one", async () => {
+      // Arrange
+      const seams = seamsIn({ [REGISTRY]: recordLine(record()), [TRANSCRIPT]: titled("sol-resume") });
+
+      // Act
+      await launchSolr({ seams, processArgv: ["node", "/bin/solr"] });
+
+      // Assert
+      expect(execArgv(seams).slice(-4)).toEqual(["-r", "s1", "--name", "sol-resume"]);
+    });
+
+    it("should take the transcript's title over a stale record name, for the argv and the log line alike", async () => {
+      // Arrange
+      const seams = seamsIn({ [REGISTRY]: recordLine(record({ name: "the old one" })), [TRANSCRIPT]: titled("the renamed one") });
+
+      // Act
+      await launchSolr({ seams, processArgv: ["node", "/bin/solr"] });
+
+      // Assert
+      expect(execArgv(seams).slice(-4)).toEqual(["-r", "s1", "--name", "the renamed one"]);
+      expect(seams.lines.join("")).toContain("restoring the renamed one in /work");
+    });
+
+    it("should read only the claimed conversation's transcript, not every candidate's", async () => {
+      // Arrange
+      const seams = seamsIn({
+        [REGISTRY]: `${recordLine(record({ sessionId: "s1" }))}${recordLine(record({ sessionId: "s2", at: FIXED_NOW - MINUTE }))}`,
+        [TRANSCRIPT]: titled("the one it takes"),
+        [TRANSCRIPT_S2]: titled("the one it leaves")
+      });
+
+      // Act
+      await launchSolr({ seams, processArgv: ["node", "/bin/solr"] });
+
+      // Assert
+      expect(execArgv(seams).slice(-4)).toEqual(["-r", "s1", "--name", "the one it takes"]);
+      expect(seams.fs.reads.filter((path) => path.endsWith(".jsonl") && path.includes("/projects/"))).toEqual([TRANSCRIPT]);
+    });
+
+    it("should keep the name the record holds when there is no transcript left to read", async () => {
+      // Arrange
+      const seams = seamsIn({ [REGISTRY]: recordLine(record({ name: "the pcs one" })) });
+
+      // Act
+      await launchSolr({ seams, processArgv: ["node", "/bin/solr"] });
+
+      // Assert
+      expect(execArgv(seams).slice(-4)).toEqual(["-r", "s1", "--name", "the pcs one"]);
+    });
+
+    it("should find the name of a conversation filed nowhere near its cwd, with no slug recorded", async () => {
+      // Arrange
+      const seams = seamsIn({
+        [REGISTRY]: recordLine(record({ cwd: "/elsewhere" })),
+        [TRANSCRIPT]: titled("filed under the workspace root")
+      });
+
+      // Act
+      await launchSolr({ seams, processArgv: ["node", "/bin/solr"] });
+
+      // Assert
+      expect(execArgv(seams).slice(-2)).toEqual(["--name", "filed under the workspace root"]);
+    });
+
+    it("should move to the record's directory, resume-by-id not being cwd-scoped", async () => {
+      // Arrange
+      const seams = seamsIn({ [REGISTRY]: recordLine(record({ cwd: "/elsewhere" })) });
+
+      // Act
+      await launchSolr({ seams, processArgv: ["node", "/bin/solr"] });
+
+      // Assert
+      expect(seams.chdirs).toEqual(["/elsewhere"]);
+    });
+
+    it("should resume in the directory the conversation was opened in, not the worktree it later moved into", async () => {
+      // Arrange
+      // `/elsewhere` is where the engineer opened it and is trusted; `/work` is a fresh worktree.
+      const seams = seamsIn({
+        [REGISTRY]: recordLine(record({ cwd: "/work" })),
+        [TRANSCRIPT]: `${inDir("/elsewhere")}${titled("the pcs one")}${inDir("/work")}`
+      });
+
+      // Act
+      await launchSolr({ seams, processArgv: ["node", "/bin/solr"] });
+
+      // Assert
+      expect(seams.chdirs).toEqual(["/elsewhere"]);
+      expect(seams.lines.join("")).toContain("restoring the pcs one in /elsewhere");
+    });
+
+    it("should fall back to the record's cwd when the opening directory has been deleted since", async () => {
+      // Arrange
+      const seams = seamsIn({
+        [REGISTRY]: recordLine(record({ cwd: "/work" })),
+        [TRANSCRIPT]: `${inDir("/a-deleted-worktree")}${titled("the pcs one")}`
+      });
+
+      // Act
+      await launchSolr({ seams, processArgv: ["node", "/bin/solr"] });
+
+      // Assert
+      expect(seams.chdirs).toEqual(["/work"]);
+      expect(seams.lines.join("")).toContain("restoring the pcs one in /work");
+    });
+
+    it("should fall back to the record's cwd for a transcript carrying no cwd field at all", async () => {
+      // Arrange
+      const seams = seamsIn({ [REGISTRY]: recordLine(record({ cwd: "/other" })), [TRANSCRIPT]: titled("the pcs one") });
+
+      // Act
+      await launchSolr({ seams, processArgv: ["node", "/bin/solr"] });
+
+      // Assert
+      expect(seams.chdirs).toEqual(["/other"]);
+      expect(seams.lines.join("")).toContain("restoring the pcs one in /other");
+    });
+
+    it("should never leave the claim held by a chdir that throws, the opening directory having had no check before it", async () => {
+      // Arrange
+      const seams = seamsIn({
+        [REGISTRY]: recordLine(record({ cwd: "/work" })),
+        [TRANSCRIPT]: `${inDir("/a-deleted-worktree")}${titled("the pcs one")}`
+      });
+      const chdirs: string[] = [];
+      // `process.chdir` throws on a directory that is not there, and the claim is held by now.
+      seams.chdir = (dir): void => {
+        if (!seams.fs.dirs.has(dir)) {
+          throw new Error(`ENOENT: no such file or directory, chdir '${dir}'`);
+        }
+        chdirs.push(dir);
+      };
+
+      // Act
+      await launchSolr({ seams, processArgv: ["node", "/bin/solr"] });
+
+      // Assert
+      expect(chdirs).toEqual(["/work"]);
+      expect(execArgv(seams).slice(-4)).toEqual(["-r", "s1", "--name", "the pcs one"]);
+    });
+
+    it("should fall back when the opening path is a file, which a bare existence check would have passed", async () => {
+      // Arrange
+      // `/a-reused-path` exists but is not a directory, so a `chdir` onto it throws ENOTDIR.
+      const seams = seamsIn({
+        [REGISTRY]: recordLine(record({ cwd: "/work" })),
+        [TRANSCRIPT]: `${inDir("/a-reused-path")}${titled("the pcs one")}`,
+        "/a-reused-path": "not a directory"
+      });
+
+      // Act
+      await launchSolr({ seams, processArgv: ["node", "/bin/solr"] });
+
+      // Assert
+      expect(seams.chdirs).toEqual(["/work"]);
+      expect(seams.lines.join("")).toContain("restoring the pcs one in /work");
+    });
+
+    it("should fall back when the opening directory goes between the stat and the chdir, rather than strand the claim", async () => {
+      // Arrange
+      // The stat passes, so `/elsewhere` is chosen — and then it is gone by the chdir.
+      const seams = seamsIn({
+        [REGISTRY]: recordLine(record({ cwd: "/work" })),
+        [TRANSCRIPT]: `${inDir("/elsewhere")}${titled("the pcs one")}`
+      });
+      const chdirs: string[] = [];
+      seams.chdir = (dir): void => {
+        chdirs.push(dir);
+        if (dir === "/elsewhere") {
+          throw new Error(`ENOENT: no such file or directory, chdir '${dir}'`);
+        }
+      };
+
+      // Act
+      await launchSolr({ seams, processArgv: ["node", "/bin/solr"] });
+
+      // Assert
+      expect(chdirs).toEqual(["/elsewhere", "/work"]);
+      expect(seams.lines.join("")).toContain("/elsewhere could not be entered (ENOENT");
+      expect(seams.lines.join("")).toContain("so this resumes in /work instead");
+      expect(seams.lines.join("")).toContain("restoring the pcs one in /work");
+      expect(execArgv(seams).slice(-4)).toEqual(["-r", "s1", "--name", "the pcs one"]);
+    });
+
+    it("should let a chdir onto the record's own cwd throw, that race being the one probeDirs already has", async () => {
+      // Arrange
+      const seams = seamsIn({ [REGISTRY]: recordLine(record({ cwd: "/work" })) });
+      seams.chdir = (dir): void => {
+        throw new Error(`ENOENT: no such file or directory, chdir '${dir}'`);
+      };
+
+      // Act / Assert
+      await expect(launchSolr({ seams, processArgv: ["node", "/bin/solr"] })).rejects.toThrow("chdir '/work'");
+      expect(seams.runner.execCalls).toEqual([]);
+    });
+
+    it("should claim before handing over, so the resumed session's own hook cannot be read as free", async () => {
+      // Arrange
+      const seams = seamsIn({ [REGISTRY]: recordLine(record()) });
+      const claimedAtHandover: boolean[] = [];
+      seams.runner.exec = async () => {
+        claimedAtHandover.push(seams.fs.store.has(claimPath({ HOME }, "s1")!));
+        return undefined as never;
+      };
+
+      // Act
+      await launchSolr({ seams, processArgv: ["node", "/bin/solr"] });
+
+      // Assert
+      expect(claimedAtHandover).toEqual([true]);
+    });
+
+    it("should give two terminals two different conversations", async () => {
+      // Arrange
+      const files = {
+        [REGISTRY]: `${recordLine(record({ sessionId: "s1", at: FIXED_NOW - 2 * MINUTE }))}${recordLine(record({ sessionId: "s2", at: FIXED_NOW - MINUTE }))}`
+      };
+      const first = seamsIn(files, { pid: 1 });
+      const second = seamsIn({ ...files }, { pid: 2 });
+
+      // Act
+      await launchSolr({ seams: first, processArgv: ["node", "/bin/solr"] });
+      for (const [path, contents] of first.fs.store) {
+        if (path.includes("solr-claims")) {
+          second.fs.store.set(path, contents);
+        }
+      }
+      // The pid that took the first claim is still running; the crashed sessions' are gone.
+      second.runner.run = async (argv) => (argv[0] === "ps" && argv[2] === "1" ? { code: 0, stdout: "1\n", stderr: "" } : { code: 1, stdout: "", stderr: "" });
+      await launchSolr({ seams: second, processArgv: ["node", "/bin/solr"] });
+
+      // Assert
+      expect(execArgv(first).slice(-2)).toEqual(["-r", "s2"]);
+      expect(execArgv(second).slice(-2)).toEqual(["-r", "s1"]);
+    });
+
+    it("should start a fresh session when there is nothing waiting, rather than refuse to run", async () => {
+      // Arrange
+      const seams = seamsIn();
+
+      // Act
+      await launchSolr({ seams, processArgv: ["node", "/bin/solr"] });
+
+      // Assert
+      expect(execArgv(seams)).not.toContain("-r");
+      expect(seams.lines.join("")).toContain(NOTHING_TO_RESTORE);
+      expect(seams.chdirs).toEqual([]);
+    });
+
+    it("should leave a live session alone, -r on one forking a copy rather than attaching", async () => {
+      // Arrange
+      const seams = seamsIn(
+        { [REGISTRY]: recordLine(record()) },
+        {
+          respond: (argv) => (argv[0] === "ps" ? { code: 0, stdout: "100\n" } : respond(argv))
+        }
+      );
+
+      // Act
+      await launchSolr({ seams, processArgv: ["node", "/bin/solr"] });
+
+      // Assert
+      expect(execArgv(seams)).not.toContain("-r");
+    });
+
+    it("should hand sol's own entrypoint over, so a self-update does not re-enter solr", async () => {
+      // Arrange
+      const seams = seamsIn(
+        {
+          [REGISTRY]: recordLine(record()),
+          // A published version, with a newer one on the feed: that is what re-execs.
+          [`${packageRoot()}package.json`]: JSON.stringify({ version: "0.1.0" })
+        },
+        {
+          env: { HOME },
+          // The bin symlink, as node reports it.
+          scriptPath: "/usr/local/bin/solr",
+          fetch: async () => new Response(JSON.stringify({ "dist-tags": { latest: "99.0.0" } }))
+        }
+      );
+
+      // Act
+      await launchSolr({ seams, processArgv: ["node", "/usr/local/bin/solr"] });
+
+      // Assert
+      expect(execArgv(seams)).toEqual([seams.execPath, solScriptPath(), "-r", "s1"]);
+      expect(solScriptPath()).toMatch(/\/bin\/sol\.js$/);
+    });
+  });
+
+  describe("--list", () => {
+    it("should print the candidates without claiming any of them", async () => {
+      // Arrange
+      const seams = seamsIn({
+        [REGISTRY]: `${recordLine(record({ name: "pcs" }))}${recordLine(record({ sessionId: "s2", cwd: "/other", at: FIXED_NOW - MINUTE }))}`
+      });
+
+      // Act
+      await launchSolr({ seams, processArgv: ["node", "/bin/solr", "--list"] });
+
+      // Assert
+      expect(seams.out.join("")).toBe("s1  pcs  this directory  (last here)\ns2  (unnamed)  /other\n");
+      expect(seams.fs.store.has(claimPath({ HOME }, "s1")!)).toBe(false);
+      expect(seams.runner.execCalls).toEqual([]);
+    });
+
+    it("should print the candidates in the order it would claim them, the top line being the one solr takes", async () => {
+      // Arrange
+      const registry = [
+        recordLine(record({ sessionId: "stale", name: "six days ago", at: FIXED_NOW - 6 * DAY })),
+        recordLine(record({ sessionId: "latest", name: "a minute ago", at: FIXED_NOW - MINUTE })),
+        recordLine(record({ sessionId: "middle", name: "two days ago", at: FIXED_NOW - 2 * DAY }))
+      ].join("");
+
+      // Act
+      const listing = seamsIn({ [REGISTRY]: registry });
+      await launchSolr({ seams: listing, processArgv: ["node", "/bin/solr", "--list"] });
+      const claiming = seamsIn({ [REGISTRY]: registry });
+      await launchSolr({ seams: claiming, processArgv: ["node", "/bin/solr"] });
+
+      // Assert
+      expect(listing.out.join("")).toBe(
+        "latest  a minute ago  this directory  (last here)\nmiddle  two days ago  this directory  (last here)\nstale  six days ago  this directory  (last here)\n"
+      );
+      expect(execArgv(claiming).slice(-2)).toEqual(["--name", "a minute ago"]);
+      expect(execArgv(claiming)).toContain("latest");
+    });
+
+    it("should list a conversation under the transcript's title, not the stale name in the registry", async () => {
+      // Arrange
+      const seams = seamsIn({ [REGISTRY]: recordLine(record({ name: "the old one" })), [TRANSCRIPT]: titled("the renamed one") });
+
+      // Act
+      await launchSolr({ seams, processArgv: ["node", "/bin/solr", "--list"] });
+
+      // Assert
+      expect(seams.out.join("")).toBe("s1  the renamed one  this directory  (last here)\n");
+    });
+
+    it("should read every candidate's transcript, having a name to print for each of them", async () => {
+      // Arrange
+      const seams = seamsIn({
+        [REGISTRY]: `${recordLine(record({ sessionId: "s1" }))}${recordLine(record({ sessionId: "s2", at: FIXED_NOW - MINUTE }))}`,
+        [TRANSCRIPT]: titled("the first one"),
+        [TRANSCRIPT_S2]: titled("the second one")
+      });
+
+      // Act
+      await launchSolr({ seams, processArgv: ["node", "/bin/solr", "--list"] });
+
+      // Assert
+      expect(seams.out.join("")).toBe("s1  the first one  this directory  (last here)\ns2  the second one  this directory  (last here)\n");
+      expect(seams.fs.reads.filter((path) => path.endsWith(".jsonl") && path.includes("/projects/"))).toEqual([TRANSCRIPT, TRANSCRIPT_S2]);
+    });
+
+    it("should list the directory each candidate would be resumed in, not its last-seen cwd", async () => {
+      // Arrange
+      const seams = seamsIn({
+        [REGISTRY]: `${recordLine(record({ sessionId: "s1", cwd: "/other" }))}${recordLine(record({ sessionId: "s2", cwd: "/other", at: FIXED_NOW - MINUTE }))}`,
+        [TRANSCRIPT]: `${inDir("/elsewhere")}${titled("moved into a worktree")}`,
+        [TRANSCRIPT_S2]: `${inDir("/a-deleted-worktree")}${titled("opened somewhere gone")}`
+      });
+
+      // Act
+      await launchSolr({ seams, processArgv: ["node", "/bin/solr", "--list"] });
+
+      // Assert
+      expect(seams.out.join("")).toBe("s1  moved into a worktree  /elsewhere\ns2  opened somewhere gone  /other\n");
+    });
+
+    it("should mark the candidate the ordering put first, when both would resume in this directory", async () => {
+      // Arrange
+      // Both opened in /work, which is where `solr --list` is being run; only s1 was last
+      // seen there, which is what `rank` sorts on and the only thing distinguishing the two.
+      const seams = seamsIn({
+        [REGISTRY]: `${recordLine(record({ sessionId: "s1", cwd: "/work" }))}${recordLine(record({ sessionId: "s2", cwd: "/elsewhere", at: FIXED_NOW - MINUTE }))}`,
+        [TRANSCRIPT]: `${inDir("/work")}${titled("last used here")}`,
+        [TRANSCRIPT_S2]: `${inDir("/work")}${titled("opened here, used elsewhere")}`
+      });
+
+      // Act
+      await launchSolr({ seams, processArgv: ["node", "/bin/solr", "--list"] });
+
+      // Assert
+      expect(seams.out.join("")).toBe("s1  last used here  this directory  (last here)\ns2  opened here, used elsewhere  this directory\n");
+    });
+
+    it("should list a conversation by the name the registry holds when no transcript is there", async () => {
+      // Arrange
+      const seams = seamsIn({ [REGISTRY]: recordLine(record({ name: "the pcs one" })) });
+
+      // Act
+      await launchSolr({ seams, processArgv: ["node", "/bin/solr", "--list"] });
+
+      // Assert
+      expect(seams.out.join("")).toBe("s1  the pcs one  this directory  (last here)\n");
+    });
+
+    it("should say so when nothing is waiting", async () => {
+      // Arrange
+      const seams = seamsIn();
+
+      // Act
+      await launchSolr({ seams, processArgv: ["node", "/bin/solr", "--list"] });
+
+      // Assert
+      expect(seams.out.join("")).toBe(`${NOTHING_TO_RESTORE}\n`);
+    });
+
+    it("should explain what it passed over when asked to", async () => {
+      // Arrange
+      const seams = seamsIn({ [REGISTRY]: recordLine(record({ state: "closed" })) }, { env: { HOME, SOL_VERBOSE: "1" } });
+
+      // Act
+      await launchSolr({ seams, processArgv: ["node", "/bin/solr", "--list"] });
+
+      // Assert
+      expect(seams.lines.join("")).toContain("s1: the session was closed cleanly");
+    });
+  });
+
+  describe("hook", () => {
+    it("should maintain the registry and run no claude at all", async () => {
+      // Arrange
+      const seams = seamsIn(
+        {},
+        {
+          env: { HOME, CLAUDE_CODE_SESSION_ATTENDED: "1", CLAUDE_PID: "900" },
+          stdinText: JSON.stringify({ session_id: "s1", cwd: "/work" })
+        }
+      );
+
+      // Act
+      await launchSolr({ seams, processArgv: ["node", "/bin/solr", "hook", "UserPromptSubmit"] });
+
+      // Assert
+      expect(seams.fs.store.get(REGISTRY)).toContain('"sessionId":"s1"');
+      expect(seams.runner.execCalls).toEqual([]);
+      expect(seams.runner.interactiveCalls).toEqual([]);
+    });
+  });
+});
+
+describe("launchSolr on a host", () => {
+  const VOLUME_REGISTRY = `${VOLUME_HOME}/.claude/sessions.jsonl`;
+
+  /** No container signals, so the registry is read out of the Claude volume through the helper. */
+  function onHost(registry: string, env: Record<string, string> = {}) {
+    const seams = createFakeSeams({
+      env: { HOME, SOL_NO_UPDATE: "1", ...env },
+      cwd: "/work",
+      respond: (argv) => {
+        if (argv[0] === "ps") {
+          return { code: 1 };
+        }
+        const path = argv.at(-1);
+        if (argv[1] === "run" && argv.includes('cat -- "$1"')) {
+          return path === VOLUME_REGISTRY ? { stdout: registry } : { code: 1 };
+        }
+        return { code: 0 };
+      }
+    });
+    seams.fs.dirs.add("/work");
+    return seams;
+  }
+
+  it("should read the registry out of the shared Claude volume", async () => {
+    // Arrange
+    const seams = onHost(recordLine(record()));
+
+    // Act
+    await launchSolr({ seams, processArgv: ["node", "/bin/solr", "--list"] });
+
+    // Assert
+    const read = seams.runner.calls.find((call) => call.argv.at(-1) === VOLUME_REGISTRY);
+    expect(read?.argv.slice(0, 6)).toEqual(["docker", "run", "--rm", "-i", "--mount", `type=volume,source=sol-claude,target=${VOLUME_HOME}/.claude`]);
+    expect(seams.out.join("")).toContain("s1");
+  });
+
+  it("should read the volume SOL_CLAUDE_VOLUME names", async () => {
+    // Arrange
+    const seams = onHost("", { SOL_CLAUDE_VOLUME: "work-claude" });
+
+    // Act
+    await launchSolr({ seams, processArgv: ["node", "/bin/solr", "--list"] });
+
+    // Assert
+    expect(seams.runner.calls[0]?.argv).toContain(`type=volume,source=work-claude,target=${VOLUME_HOME}/.claude`);
+  });
+});
+
+describe("compaction", () => {
+  it("should rewrite a registry that has grown long with closed conversations", async () => {
+    // Arrange
+    const closed = Array.from({ length: COMPACTION_THRESHOLD }, (_, index) => recordLine(record({ sessionId: `c${index}`, state: "closed" }))).join("");
+    const seams = seamsIn({ [REGISTRY]: closed + recordLine(record()) });
+
+    // Act
+    await launchSolr({ seams, processArgv: ["node", "/bin/solr", "--list"] });
+
+    // Assert
+    expect(seams.fs.store.get(REGISTRY)).toBe(recordLine(record()));
+  });
+});
