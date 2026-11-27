@@ -12,7 +12,7 @@ ARG JAVA_VERSION=21
 # renovate: datasource=maven depName=org.apache.maven:apache-maven
 ARG MAVEN_VERSION=3.10.2
 # renovate: datasource=gradle-version depName=gradle
-ARG GRADLE_VERSION=9.9.2
+ARG GRADLE_VERSION=9.9.3
 # renovate: datasource=github-releases depName=astral-sh/uv
 ARG UV_VERSION=0.13.10
 # renovate: datasource=github-releases depName=mikefarah/yq
