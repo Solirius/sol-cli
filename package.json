@@ -1,6 +1,6 @@
 {
   "name": "@solirius-reply/ai-cli",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "sol — runs Claude Code inside a container, sharing one container per working directory and one Claude login across them all.",
   "license": "MIT",
   "type": "module",
