@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # sol's default session image: Java, Node and Python on Ubuntu, with Claude Code, a nested
 # Docker engine and the usual development tools. Published as ghcr.io/solirius/devcontainer.
-FROM ubuntu:24.04@sha256:562111b88caa79c71391c0c4d3c2114a7d5c35915c20561fd893cb1e07929e6b
+FROM ubuntu:26.04@sha256:d66b366dac61b575bee2aef07e9c26e8070096fbe84a3d4d3eb0da069b5d76db
 
 ARG TARGETARCH
 
