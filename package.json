@@ -36,11 +36,11 @@
     "test:coverage": "vitest run --coverage"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.4.15",
-    "@types/node": "26.6.6",
-    "@vitest/coverage-v8": "5.1.1",
+    "@biomejs/biome": "2.6.9",
+    "@types/node": "26.6.11",
+    "@vitest/coverage-v8": "5.1.2",
     "typescript": "7.0.2",
-    "vite": "8.3.8",
-    "vitest": "5.1.1"
+    "vite": "8.4.0",
+    "vitest": "5.1.2"
   }
 }
