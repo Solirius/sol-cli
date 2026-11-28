@@ -7,7 +7,7 @@ export const CLAUDE_CONFIG_DIR = `${VOLUME_HOME}/.claude`;
 export const DEFAULT_CLAUDE_VOLUME = "sol-claude";
 
 /** A few megabytes, and nothing of the session image is assumed: `sh`, `cat`, `stat` and `mv` are all it is used for. */
-export const HELPER_IMAGE = "busybox:1.37.0";
+export const HELPER_IMAGE = "busybox:1.38.0";
 
 /** `createExclusive`'s "someone else already had it", told apart from a failed write. */
 const EXISTS_CODE = 3;
